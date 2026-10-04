@@ -2,112 +2,204 @@
 """FrameMonster - extract frames from a video as images using ffmpeg."""
 
 import argparse
+import math
 import platform
+import re
 import shutil
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 
-def parse_args():
+def positive_float(value):
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0")
+    return number
+
+
+def scale_dimensions(value):
+    match = re.fullmatch(r"(-?\d+)[xX](-?\d+)", value)
+    if not match or any(
+        not -2147483647 <= int(part) <= 2147483647 for part in match.groups()
+    ):
+        raise argparse.ArgumentTypeError(
+            "use WIDTHxHEIGHT with integer dimensions, 0 (original size), "
+            "or -N (keep aspect ratio and round to a multiple of N)"
+        )
+    return "x".join(str(int(part)) for part in match.groups())
+
+
+def filename_prefix(value):
+    if not value or any(char in r'\/<>:"|?*' or ord(char) < 32 for char in value):
+        raise argparse.ArgumentTypeError(
+            "must be a non-empty filename prefix without path separators "
+            "or characters invalid in Windows filenames"
+        )
+    return value
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="framemonster",
-        description="Extract frames from a video and save them as images.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Extract frames from a video or folder of videos as images.",
+        epilog="Defaults: 1 frame per second, JPG format, frame_00001.jpg filenames.",
     )
     p.add_argument(
         "video",
         help="Path to an input video file, or a directory containing video files",
     )
     p.add_argument(
-        "-o", "--output-dir",
+        "-o",
+        "--output-dir",
         help="Directory to save extracted frames into. For a single video, "
-             "frames go directly into this directory (default: "
-             "'<video-name>_frames' next to the video). For a directory of "
-             "videos, a subfolder per video is created under this directory "
-             "(default: '<video-name>_frames' next to each video).",
+        "frames go directly into this directory (default: "
+        "'<video-name>_frames' next to the video). For a directory of "
+        "videos, subdirectories are preserved and a subfolder per video "
+        "is created under this directory "
+        "(default: '<video-name>_frames' next to each video).",
     )
     p.add_argument(
-        "-r", "--recursive", action="store_true",
+        "-r",
+        "--recursive",
+        action="store_true",
         help="When VIDEO is a directory, also search subdirectories",
     )
 
     rate = p.add_mutually_exclusive_group()
     rate.add_argument(
-        "--fps", type=float,
+        "--fps",
+        type=positive_float,
         help="Frames to extract per second, e.g. 4 for 4 frames/sec",
     )
     rate.add_argument(
-        "--interval", type=float,
+        "--interval",
+        type=positive_float,
         help="Seconds between extracted frames, e.g. 2 for 1 frame every 2 seconds",
     )
 
     p.add_argument(
-        "--format", choices=["jpg", "png"], default="jpg",
-        help="Output image format",
+        "--format",
+        choices=["jpg", "png"],
+        default="jpg",
+        help="Output image format (default: jpg)",
     )
     p.add_argument(
-        "--quality", type=int, default=2,
-        help="JPEG quality for ffmpeg's -qscale:v (2=best, 31=worst). Ignored for png.",
+        "--quality",
+        type=int,
+        default=2,
+        help="JPEG quality from 2 (highest) to 31 (lowest); default: 2. Ignored for png.",
     )
     p.add_argument(
-        "--prefix", default="frame",
-        help="Filename prefix for extracted frames",
+        "--prefix",
+        type=filename_prefix,
+        default="frame",
+        help="Filename prefix for extracted frames (default: frame)",
     )
     p.add_argument(
-        "--start-number", type=int, default=1,
-        help="Starting number for the frame filename sequence",
+        "--start-number",
+        type=int,
+        default=1,
+        help="Starting number from 0 to 2147483647 (default: 1)",
     )
     p.add_argument(
         "--scale",
-        help="Resize frames, e.g. 1280x720 or 1280x-1 (keep aspect ratio)",
+        type=scale_dimensions,
+        help="Resize frames, e.g. 1280x720, 1280x-1 (keep aspect ratio), "
+        "or 1280x-2 (also round height to even)",
     )
     p.add_argument(
         "--start", help="Start time to begin extracting from, e.g. 00:00:10 or 10"
     )
+    p.add_argument("--duration", help="Duration to extract, e.g. 00:00:30 or 30")
     p.add_argument(
-        "--duration", help="Duration to extract, e.g. 00:00:30 or 30"
-    )
-    p.add_argument(
-        "--overwrite", action="store_true",
-        help="Overwrite existing files in the output directory",
+        "--overwrite",
+        action="store_true",
+        help="Allow non-empty output directories and overwrite matching filenames; "
+        "other files are kept",
     )
 
-    return p.parse_args()
+    args = p.parse_args(argv)
+    if not 2 <= args.quality <= 31:
+        p.error("--quality must be between 2 and 31")
+    if not 0 <= args.start_number <= 2147483647:
+        p.error("--start-number must be between 0 and 2147483647")
+    return args
 
 
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
-    ".wmv", ".flv", ".mpg", ".mpeg", ".3gp",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".webm",
+    ".m4v",
+    ".wmv",
+    ".flv",
+    ".mpg",
+    ".mpeg",
+    ".3gp",
 }
 
 
 def find_videos(directory, recursive):
     globber = directory.rglob if recursive else directory.glob
     videos = sorted(
-        f for f in globber("*")
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        f for f in globber("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
     )
     return videos
 
 
 def build_fps_expr(args):
     if args.fps is not None:
-        if args.fps <= 0:
-            sys.exit("error: --fps must be greater than 0")
         return str(args.fps)
     if args.interval is not None:
-        if args.interval <= 0:
-            sys.exit("error: --interval must be greater than 0")
         return f"1/{args.interval}"
     # default: 1 frame per second
     return "1"
 
 
-def extract_frames(video_path, output_dir, args, fps_expr):
-    output_dir.mkdir(parents=True, exist_ok=True)
+def plan_outputs(directory, videos, base_output_dir):
+    """Preserve source subdirectories and disambiguate matching video stems."""
+    include_extension = set()
+    while True:
+        outputs = []
+        groups = defaultdict(list)
+        for index, video in enumerate(videos):
+            name = video.name if index in include_extension else video.stem
+            if base_output_dir is not None:
+                output = base_output_dir / video.parent.relative_to(directory) / name
+            else:
+                output = video.with_name(f"{name}_frames")
+            outputs.append(output)
+            # Case folding also protects batches on case-insensitive filesystems.
+            groups[str(output.resolve()).casefold()].append(index)
 
-    if any(output_dir.iterdir()) and not args.overwrite:
+        collisions = {
+            index for group in groups.values() if len(group) > 1 for index in group
+        }
+        if not collisions:
+            return list(zip(videos, outputs))
+        if collisions <= include_extension:
+            raise ValueError(
+                "video names still share an output directory after including their "
+                "extensions; rename the conflicting videos or process them separately"
+            )
+        include_extension.update(collisions)
+
+
+def extract_frames(video_path, output_dir, args, fps_expr):
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_not_empty = any(output_dir.iterdir())
+    except OSError as exc:
+        print(
+            f"error: cannot use output directory {output_dir}: {exc}", file=sys.stderr
+        )
+        return None
+
+    if output_not_empty and not args.overwrite:
         print(
             f"skipping {video_path.name}: output directory is not empty: {output_dir}\n"
             f"          pass --overwrite to write into it anyway",
@@ -121,28 +213,47 @@ def extract_frames(video_path, output_dir, args, fps_expr):
         vf_parts.append(f"scale={w}:{h}")
     vf = ",".join(vf_parts)
 
-    pattern = f"{args.prefix}_%05d.{args.format}"
-    out_path = output_dir / pattern
+    # image2 interprets '%' anywhere in the full path as a sequence placeholder.
+    output_base = str(output_dir.absolute() / args.prefix).replace("%", "%%")
+    out_path = f"{output_base}_%05d.{args.format}"
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-progress",
+        "pipe:1",
+        "-y" if args.overwrite else "-n",
+    ]
     if args.start:
         cmd += ["-ss", args.start]
-    cmd += ["-i", str(video_path)]
+    cmd += ["-i", str(video_path.absolute())]
     if args.duration:
         cmd += ["-t", args.duration]
     cmd += ["-vf", vf, "-start_number", str(args.start_number)]
     if args.format == "jpg":
         cmd += ["-qscale:v", str(args.quality)]
-    cmd += [str(out_path)]
+    cmd += ["-f", "image2", out_path]
 
     print(f"Extracting frames from {video_path.name} -> {output_dir} (fps={fps_expr})")
-    result = subprocess.run(cmd)
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, check=False)
+    except OSError as exc:
+        print(f"error: cannot run ffmpeg for {video_path.name}: {exc}", file=sys.stderr)
+        return None
     if result.returncode != 0:
-        print(f"error: ffmpeg exited with status {result.returncode} for {video_path.name}",
-              file=sys.stderr)
+        print(
+            f"error: ffmpeg exited with status {result.returncode} for {video_path.name}",
+            file=sys.stderr,
+        )
         return None
 
-    frame_count = len(list(output_dir.glob(f"{args.prefix}_*.{args.format}")))
+    frame_count = 0
+    for line in result.stdout.splitlines():
+        if line.startswith("frame="):
+            frame_count = int(line.partition("=")[2].strip())
     print(f"Done. {frame_count} frame(s) saved to {output_dir}")
     return frame_count
 
@@ -159,7 +270,8 @@ def ffmpeg_install_hint():
         )
     if system == "Windows":
         return (
-            "Install it with 'winget install ffmpeg' or 'choco install ffmpeg', "
+            "Install it with 'winget install --id Gyan.FFmpeg --exact' "
+            "or 'choco install ffmpeg', "
             "or download a build from https://ffmpeg.org/download.html and add it to PATH."
         )
     return "Download a build for your platform from https://ffmpeg.org/download.html."
@@ -179,11 +291,16 @@ def main():
         if not videos:
             sys.exit(f"error: no video files found under {video_arg}")
 
-        base_output_dir = Path(args.output_dir).expanduser() if args.output_dir else None
+        base_output_dir = (
+            Path(args.output_dir).expanduser() if args.output_dir else None
+        )
+        try:
+            planned_outputs = plan_outputs(video_arg, videos, base_output_dir)
+        except (OSError, ValueError) as exc:
+            sys.exit(f"error: {exc}")
+
         failures = 0
-        for video_path in videos:
-            output_dir = (base_output_dir / video_path.stem) if base_output_dir else \
-                video_path.with_name(f"{video_path.stem}_frames")
+        for video_path, output_dir in planned_outputs:
             if extract_frames(video_path, output_dir, args, fps_expr) is None:
                 failures += 1
 
@@ -196,8 +313,11 @@ def main():
     if not video_arg.is_file():
         sys.exit(f"error: video file or directory not found: {video_arg}")
 
-    output_dir = Path(args.output_dir).expanduser() if args.output_dir else \
-        video_arg.with_name(f"{video_arg.stem}_frames")
+    output_dir = (
+        Path(args.output_dir).expanduser()
+        if args.output_dir
+        else video_arg.with_name(f"{video_arg.stem}_frames")
+    )
     if extract_frames(video_arg, output_dir, args, fps_expr) is None:
         sys.exit(1)
 
