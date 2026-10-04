@@ -1,24 +1,33 @@
 # FrameMonster
 
-Extract frames from a video (or a whole folder of videos) as images, using `ffmpeg`.
+Extract frames from videos and save them as JPG or PNG images. Process one video
+or a folder of videos, choose how often to take a frame, and optionally trim or
+resize the result.
+
+By default, FrameMonster saves **one frame per second** as JPG files named
+`frame_00001.jpg`, `frame_00002.jpg`, and so on. Your source videos are kept intact.
 
 ## Requirements
 
-- Python 3.7+
-- [ffmpeg](https://ffmpeg.org/) available on your `PATH`
+- [Python](https://www.python.org/downloads/) 3.7 or newer.
+- [FFmpeg](https://ffmpeg.org/download.html), installed and available on your `PATH`
+  (the directories your terminal searches for commands).
 
-### Installing ffmpeg
+FrameMonster uses Python's standard library; no Python packages need to be installed.
 
-**macOS**
+### Install FFmpeg
+
+**macOS** with [Homebrew](https://brew.sh):
 
 ```sh
 brew install ffmpeg
 ```
 
-**Linux**
+**Linux** — use the command for your distribution:
 
 ```sh
 # Debian / Ubuntu
+sudo apt update
 sudo apt install ffmpeg
 
 # Fedora
@@ -28,95 +37,190 @@ sudo dnf install ffmpeg
 sudo pacman -S ffmpeg
 ```
 
-**Windows**
+**Windows** — in PowerShell or Command Prompt, using
+[Windows Package Manager](https://learn.microsoft.com/windows/package-manager/winget/):
 
-```sh
-winget install ffmpeg
-# or
-choco install ffmpeg
+```powershell
+winget install --id Gyan.FFmpeg --exact
 ```
 
-Or download a static build for your platform from the [ffmpeg downloads page](https://ffmpeg.org/download.html) and add it to your `PATH`.
+If you use Chocolatey, `choco install ffmpeg` is another option. You can also get a
+build from the [FFmpeg downloads page](https://ffmpeg.org/download.html) and add its
+`bin` directory to your `PATH`. Open a new terminal after installation.
 
-## Installation
-
-Clone the repo and make the script executable:
+Check that FFmpeg is available:
 
 ```sh
-git clone git@github.com:wernjien/framemonster.git
+ffmpeg -version
+```
+
+## Quick start
+
+Download this repository as a ZIP and extract it, or clone it with Git:
+
+```sh
+git clone https://github.com/wernjien/framemonster.git
 cd framemonster
-chmod +x framemonster
 ```
 
-Optionally, put it on your `PATH` so you can run `framemonster` from anywhere:
+Run the following command from the repository folder. Replace `my video.mp4` with
+the path to your own video; keep quotation marks around paths containing spaces.
+
+**macOS / Linux:**
 
 ```sh
-ln -s "$(pwd)/framemonster" /usr/local/bin/framemonster
+python3 framemonster "my video.mp4"
 ```
 
-> **Windows users:** the file has no extension and relies on a Unix-style `#!/usr/bin/env python3` shebang, so it won't run by double-clicking or via `framemonster` directly in cmd/PowerShell. Run it explicitly with Python instead:
->
-> ```sh
-> python framemonster <video> [options]
-> ```
+**Windows:**
 
-## Usage
+```powershell
+python framemonster "my video.mp4"
+```
+
+The images will appear in a new `my video_frames` folder beside the video.
+Output folders are created automatically. Use `python3 framemonster --help` to see
+all options; on Windows, replace `python3` with `python` in the examples below.
+
+On macOS / Linux, you can also run `chmod +x framemonster` once and then use
+`./framemonster` instead of `python3 framemonster`.
+
+## Common examples
+
+Save four frames per second as PNG images:
 
 ```sh
-./framemonster VIDEO [options]
+python3 framemonster myvideo.mp4 --fps 4 --format png
 ```
 
-`VIDEO` can be a single video file or a directory containing video files (use `-r`/`--recursive` to include subdirectories).
-
-### Examples
-
-Extract 1 frame per second (default) next to the video, into `myvideo_frames/`:
+Save one frame every two seconds in a folder named `frames`:
 
 ```sh
-./framemonster myvideo.mp4
+python3 framemonster myvideo.mp4 --interval 2 -o ./frames
 ```
 
-Extract 4 frames per second as PNGs:
+Extract a 30-second section starting at 10 seconds, with images 1280 pixels wide:
 
 ```sh
-./framemonster myvideo.mp4 --fps 4 --format png
+python3 framemonster myvideo.mp4 --start 00:00:10 --duration 00:00:30 --scale 1280x-1
 ```
 
-Extract 1 frame every 2 seconds into a specific folder:
+`--duration` is the length of the section. This example covers seconds 10 through
+40. `1280x-1` calculates the height automatically to preserve the video's aspect
+ratio. Use `1280x720` to set both dimensions, or `1280x-2` to calculate an even height.
+Other negative values, such as `-4`, calculate a dimension divisible by that number,
+as described in the [FFmpeg scale documentation](https://ffmpeg.org/ffmpeg-filters.html#scale).
+
+Change the filename prefix and start numbering at 100:
 
 ```sh
-./framemonster myvideo.mp4 --interval 2 -o ./frames
+python3 framemonster myvideo.mp4 --prefix shot --start-number 100
 ```
 
-Process every video in a folder (recursively), one subfolder of frames per video:
+The first image will be named `shot_00100.jpg`. Numbering uses at least five digits.
+
+### Process a folder of videos
 
 ```sh
-./framemonster ./videos -r -o ./frames
+python3 framemonster ./videos -r -o ./frames
 ```
 
-Extract a clip from 10s to 40s, resized to 1280px wide:
+`-r` includes subdirectories. Each video gets its own output folder, and the source
+subdirectory structure is preserved:
+
+```text
+Input                           Output
+videos/intro.mp4                 frames/intro/frame_00001.jpg
+videos/day1/clip.mp4             frames/day1/clip/frame_00001.jpg
+videos/day2/clip.mp4             frames/day2/clip/frame_00001.jpg
+```
+
+Without `-o`, each output folder is created beside its video with `_frames` added
+to the name. When video names would share an output folder, their file extensions
+are included to keep them separate: `clip.mp4` and `clip.mov` become
+`frames/clip.mp4/` and `frames/clip.mov/`, or `clip.mp4_frames/` and
+`clip.mov_frames/` without `-o`.
+
+Folder searches recognize these extensions, regardless of capitalization:
+`.mp4`, `.mov`, `.mkv`, `.avi`, `.webm`, `.m4v`, `.wmv`, `.flv`, `.mpg`, `.mpeg`,
+and `.3gp`. A directly supplied video file can use any format that your FFmpeg
+installation supports.
+
+If upgrading from a version that flattened recursive output into one folder,
+check the preserved subdirectories under your chosen output folder.
+
+### Run again or replace existing frames
+
+FrameMonster skips any non-empty output folder by default. To allow writing into
+it and replace matching filenames, add `--overwrite`:
 
 ```sh
-./framemonster myvideo.mp4 --start 00:00:10 --duration 00:00:30 --scale 1280x-1
+python3 framemonster myvideo.mp4 -o ./frames --overwrite
 ```
 
-### Options
+**`--overwrite` keeps files that the current run does not replace.** For example,
+if an earlier run saved 100 images and the new run saves 10, images 11 through 100
+remain. Use a new or empty output folder when you want only the frames from the
+new run. The reported frame count always describes the current run.
 
-| Flag | Description |
-| --- | --- |
-| `-o`, `--output-dir` | Directory to save frames into (default: `<video-name>_frames` next to the video) |
-| `-r`, `--recursive` | When `VIDEO` is a directory, also search subdirectories |
-| `--fps` | Frames to extract per second |
-| `--interval` | Seconds between extracted frames (mutually exclusive with `--fps`) |
-| `--format` | Output image format: `jpg` (default) or `png` |
-| `--quality` | JPEG quality for ffmpeg's `-qscale:v` (2=best, 31=worst) |
-| `--prefix` | Filename prefix for extracted frames (default: `frame`) |
-| `--start-number` | Starting number for the frame filename sequence |
-| `--scale` | Resize frames, e.g. `1280x720` or `1280x-1` (keep aspect ratio) |
-| `--start` | Start time to begin extracting from, e.g. `00:00:10` or `10` |
-| `--duration` | Duration to extract, e.g. `00:00:30` or `30` |
-| `--overwrite` | Overwrite existing files in a non-empty output directory |
+## Options
+
+| Option | What it does | Default |
+| --- | --- | --- |
+| `-o`, `--output-dir` | Save one video's frames directly here, or a batch in subfolders here | `<video-name>_frames` beside each video |
+| `-r`, `--recursive` | Include subdirectories when the input is a folder | Off |
+| `--fps` | Frames per second; must be a positive, finite number | 1 |
+| `--interval` | Seconds between frames; must be a positive, finite number. Choose either this or `--fps` | Unset |
+| `--format` | `jpg` or `png` | `jpg` |
+| `--quality` | JPG quality: 2 is highest, 31 is lowest. Ignored for PNG | 2 |
+| `--prefix` | Filename prefix; use a name without path separators or characters invalid in Windows filenames | `frame` |
+| `--start-number` | First frame number, from 0 to 2147483647 | 1 |
+| `--scale` | Image size as `WIDTHxHEIGHT`; `0` keeps the source dimension, `-1` calculates it, `-2` calculates an even value | Original size |
+| `--start` | Start position, in seconds or `HH:MM:SS` (fractional seconds allowed) | Beginning |
+| `--duration` | Length to extract, in seconds or `HH:MM:SS` (fractional seconds allowed) | Until the end |
+| `--overwrite` | Allow non-empty output folders and replace matching filenames | Off |
+
+## Troubleshooting
+
+- **`ffmpeg not found on PATH`:** install FFmpeg, open a new terminal, and check
+  `ffmpeg -version`. For a manual installation, add the folder containing the
+  FFmpeg executable to your `PATH`.
+- **`video file or directory not found`:** check the input path. Relative paths are
+  interpreted from the terminal's current folder. Put paths with spaces in quotes.
+- **`output directory is not empty`:** choose a new output folder or use
+  `--overwrite` after checking its contents.
+- **`cannot use output directory`:** check write permissions and make sure the
+  output path points to a folder rather than an existing file.
+- **`ffmpeg exited with status ...`:** read the FFmpeg error printed above it. The
+  input may be damaged, lack a video stream, or use an unsupported codec. In a
+  batch, FrameMonster continues with the remaining videos.
+- **No frames saved:** try a longer section, an earlier start position, or a higher
+  frame rate. A section shorter than the sampling interval may produce no frames.
+
+Exit codes are `0` for a successful run, `1` if a video fails or an output folder
+is skipped, and `2` for invalid command-line options. A batch prints how many
+videos succeeded.
+
+## Development
+
+Run the regression tests from the repository folder:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+The tests use Python's standard library. Extraction tests create small temporary
+videos and run real FFmpeg commands; they are skipped if FFmpeg is unavailable.
+On Windows, use `python` in place of `python3`.
+
+For optional formatting and lint checks, install
+[Ruff](https://docs.astral.sh/ruff/) with `python3 -m pip install ruff`, then run:
+
+```sh
+ruff format framemonster tests
+ruff check framemonster tests
+```
 
 ## License
 
-MIT
+[MIT](LICENSE)
